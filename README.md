@@ -42,7 +42,7 @@ Add to `~/.claude.json`:
 | `list_threads` | List threads in a course (sortable, paginated) |
 | `get_thread` | Get thread by global ID with comments |
 | `get_course_thread` | Get thread by course-local number (the # in the UI) |
-| `search_threads` | Search threads by title/content keywords |
+| `search_threads` | Search threads by title, content, or category |
 | `post_thread` | Create a new thread (supports markdown input) |
 | `edit_thread` | Edit an existing thread |
 | `lock_thread` | Lock a thread |
@@ -61,7 +61,7 @@ Add to `~/.claude.json`:
 | `list_users` | List course roster (staff/admin) |
 | `list_user_activity` | List a user's threads and comments |
 | `upload_file_from_url` | Upload a file to Ed from a URL |
-| `format_content` | Preview markdown → Ed XML conversion |
+| `format_content` | Preview markdown to Ed XML conversion |
 
 ## Resources (2)
 
@@ -69,6 +69,14 @@ Add to `~/.claude.json`:
 |----------|-----|-------------|
 | User Info | `edstem://user` | Authenticated user details |
 | Courses | `edstem://courses` | Enrolled courses list |
+
+## Prompts (3)
+
+| Prompt | Description |
+|--------|-------------|
+| `check_assignment` | Look up assignment details, requirements, and staff clarifications |
+| `unanswered_questions` | List unresolved questions in a course |
+| `my_activity` | Show your recent posts and comments in a course |
 
 ## Content Format
 
@@ -85,10 +93,14 @@ Thread and comment content uses Ed's XML document format. This server **auto-con
 2. List
 
 > [!info] This becomes an Ed callout
-
-```python
-print("code blocks work too")
-```‎
 ```
 
 Pass raw Ed XML (starting with `<document`) to bypass conversion.
+
+## Testing
+
+```bash
+npm test
+```
+
+Uses Node's built-in test runner (`node:test`). Tests cover the markdown-to-XML content converter and API client (URL construction, headers, error handling).
