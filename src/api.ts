@@ -31,6 +31,10 @@ export class EdApiClient {
   private staticFileBaseUrl: string;
 
   constructor(token: string, region = "us") {
+    // Validate region to prevent host injection (only allow short alphanumeric codes)
+    if (!/^[a-z]{2,5}$/i.test(region)) {
+      throw new Error(`Invalid region "${region}": must be 2-5 letters (e.g. "us", "au")`);
+    }
     this.token = token;
     this.baseUrl = `https://${region}.edstem.org/api/`;
     this.staticFileBaseUrl = `https://static.${region}.edusercontent.com/files/`;
