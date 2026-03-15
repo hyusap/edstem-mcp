@@ -266,24 +266,36 @@ server.tool(
 
 // ── Tools: Thread actions ───────────────────────────────────
 
-for (const [action, desc] of [
-  ["lock", "Lock a thread (prevent new replies)"],
-  ["unlock", "Unlock a thread"],
-  ["pin", "Pin a thread to the top"],
-  ["unpin", "Unpin a thread"],
-  ["endorse", "Endorse a thread (staff)"],
-  ["unendorse", "Remove endorsement from a thread"],
-  ["star", "Star/bookmark a thread"],
-  ["unstar", "Remove star from a thread"],
-] as const) {
+const threadActions = {
+  lock: api.lockThread,
+  unlock: api.unlockThread,
+  pin: api.pinThread,
+  unpin: api.unpinThread,
+  endorse: api.endorseThread,
+  unendorse: api.unendorseThread,
+  star: api.starThread,
+  unstar: api.unstarThread,
+} as const;
+
+const threadActionDescs: Record<keyof typeof threadActions, string> = {
+  lock: "Lock a thread (prevent new replies)",
+  unlock: "Unlock a thread",
+  pin: "Pin a thread to the top",
+  unpin: "Unpin a thread",
+  endorse: "Endorse a thread (staff)",
+  unendorse: "Remove endorsement from a thread",
+  star: "Star/bookmark a thread",
+  unstar: "Remove star from a thread",
+};
+
+for (const action of Object.keys(threadActions) as (keyof typeof threadActions)[]) {
   server.tool(
     `${action}_thread`,
-    desc,
+    threadActionDescs[action],
     { thread_id: z.number().describe("Global thread ID") },
     async ({ thread_id }) => {
       try {
-        const fn = api[`${action}Thread` as keyof EdApiClient] as (id: number) => Promise<void>;
-        await fn.call(api, thread_id);
+        await threadActions[action].call(api, thread_id);
         return msg(`Thread ${thread_id} ${action}ed successfully.`);
       } catch (err) {
         return fail(err);
