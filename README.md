@@ -2,11 +2,11 @@
 
 MCP server for [Ed Discussion](https://edstem.org) — expose Ed's full API to Claude and other MCP clients.
 
-## Setup
+## Local stdio setup
 
 ```bash
-npm install
-npm run build
+bun install
+bun run build
 ```
 
 Set your API token (get one at https://edstem.org/us/settings/api-tokens):
@@ -15,6 +15,50 @@ Set your API token (get one at https://edstem.org/us/settings/api-tokens):
 export ED_API_TOKEN=your_token
 export ED_REGION=us  # optional: us (default), au, etc.
 ```
+
+By default the server runs over stdio:
+
+```bash
+bun run start
+```
+
+## HTTP mode
+
+The server can also run as a remote MCP server over Streamable HTTP.
+
+```bash
+MCP_TRANSPORT=http PORT=8080 bun run start
+```
+
+In HTTP mode, you can authenticate either by:
+
+- sending `Authorization: Bearer <ED_API_TOKEN>` on each request
+- or setting `ED_API_TOKEN` as a fallback environment variable
+
+Set `ED_READ_ONLY=true` to disable all mutating tools like posting, editing, endorsing, locking, or uploading.
+
+Health check:
+
+```bash
+curl http://localhost:8080/health
+```
+
+## Docker
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+The compose service exposes port `8080` internally to the compose network only.
+
+Then connect another container or reverse proxy to:
+
+```text
+http://edstem-mcp:8080/mcp
+```
+
+Use your Ed API token as the bearer token for that MCP server.
 
 ## Claude Code
 
@@ -32,6 +76,18 @@ Add to `~/.claude.json`:
     }
   }
 }
+```
+
+## Remote MCP example
+
+Example request shape for an HTTP client:
+
+```bash
+curl \
+  -H "Authorization: Bearer YOUR_ED_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"example","version":"1.0.0"}}}' \
+  http://localhost:8080/mcp
 ```
 
 ## Tools (22)

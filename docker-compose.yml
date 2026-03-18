@@ -1,0 +1,13 @@
+services:
+  edstem-mcp:
+    build: .
+    expose:
+      - "8080"
+    restart: unless-stopped
+    environment:
+      - MCP_TRANSPORT=http
+      - HOST=0.0.0.0
+      - PORT=8080
+      - ED_REGION=${ED_REGION:-us}
+      - ED_READ_ONLY=${ED_READ_ONLY:-false}
+      - ED_API_TOKEN=${ED_API_TOKEN:-}

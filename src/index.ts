@@ -1,6 +1,10 @@
 #!/usr/bin/env node
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Request, Response } from "express";
+import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { EdApiClient, EdApiError } from "./api.js";
 import type { EdEditThreadParams } from "./types.js";
@@ -8,21 +12,13 @@ import { edXmlToPlainText, ensureEdXml, markdownToEdXml } from "./content.js";
 
 // ── Config ──────────────────────────────────────────────────
 
-const token = process.env.ED_API_TOKEN;
-if (!token) {
-  console.error("ED_API_TOKEN environment variable is required.");
-  console.error("Get one at https://edstem.org/us/settings/api-tokens");
-  process.exit(1);
-}
 const region = process.env.ED_REGION ?? "us";
-const api = new EdApiClient(token, region);
+const host = process.env.HOST ?? "0.0.0.0";
+const port = Number(process.env.PORT ?? "8080");
+const transportMode = process.env.MCP_TRANSPORT === "http" ? "http" : "stdio";
+const readOnly = /^(1|true|yes|on)$/i.test(process.env.ED_READ_ONLY ?? "false");
 
 // ── Server ──────────────────────────────────────────────────
-
-const server = new McpServer({
-  name: "edstem",
-  version: "1.0.0",
-});
 
 function errorText(err: unknown): string {
   if (err instanceof EdApiError) {
@@ -43,64 +39,100 @@ function fail(err: unknown) {
   return { content: [{ type: "text" as const, text: errorText(err) }], isError: true as const };
 }
 
-// ── Resources ───────────────────────────────────────────────
+function readOnlyFail(toolName: string) {
+  return fail(`Tool \"${toolName}\" is disabled because ED_READ_ONLY is enabled.`);
+}
 
-server.resource("user-info", "edstem://user", async (uri) => {
-  try {
-    const data = await api.getUser();
-    return {
-      contents: [
-        {
-          uri: uri.href,
-          mimeType: "application/json",
-          text: JSON.stringify(data, null, 2),
-        },
-      ],
-    };
-  } catch (err) {
-    throw new Error(errorText(err));
-  }
-});
+function getConfiguredToken(): string | undefined {
+  return process.env.ED_API_TOKEN;
+}
 
-server.resource("courses", "edstem://courses", async (uri) => {
-  try {
-    const data = await api.getUser();
-    const courses = data.courses.map((c) => ({
-      id: c.course.id,
-      code: c.course.code,
-      name: c.course.name,
-      year: c.course.year,
-      session: c.course.session,
-      status: c.course.status,
-      role: c.role.role,
-    }));
-    return {
-      contents: [
-        {
-          uri: uri.href,
-          mimeType: "application/json",
-          text: JSON.stringify(courses, null, 2),
-        },
-      ],
-    };
-  } catch (err) {
-    throw new Error(errorText(err));
+function getBearerToken(req: IncomingMessage): string | undefined {
+  const header = req.headers.authorization;
+  if (!header) {
+    return undefined;
   }
-});
+
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  return match?.[1]?.trim();
+}
+
+function createApiClient(tokenOverride?: string): EdApiClient {
+  const token = tokenOverride ?? getConfiguredToken();
+
+  if (!token) {
+    throw new Error(
+      "No Ed API token available. Send Authorization: Bearer <ED_API_TOKEN> or set ED_API_TOKEN."
+    );
+  }
+
+  return new EdApiClient(token, region);
+}
+
+function createServer(api: EdApiClient): McpServer {
+  const server = new McpServer({
+    name: "edstem",
+    version: "1.0.0",
+  });
+
+  // ── Resources ───────────────────────────────────────────────
+
+  server.resource("user-info", "edstem://user", async (uri) => {
+    try {
+      const data = await api.getUser();
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(data, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      throw new Error(errorText(err));
+    }
+  });
+
+  server.resource("courses", "edstem://courses", async (uri) => {
+    try {
+      const data = await api.getUser();
+      const courses = data.courses.map((c) => ({
+        id: c.course.id,
+        code: c.course.code,
+        name: c.course.name,
+        year: c.course.year,
+        session: c.course.session,
+        status: c.course.status,
+        role: c.role.role,
+      }));
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(courses, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      throw new Error(errorText(err));
+    }
+  });
 
 // ── Tools: User ─────────────────────────────────────────────
 
-server.tool("get_user", "Get authenticated user info and enrolled courses", {}, async () => {
-  try {
-    return ok(await api.getUser());
-  } catch (err) {
-    return fail(err);
-  }
-});
+  server.tool("get_user", "Get authenticated user info and enrolled courses", {}, async () => {
+    try {
+      return ok(await api.getUser());
+    } catch (err) {
+      return fail(err);
+    }
+  });
 
 // ── Tools: Threads ──────────────────────────────────────────
 
-server.tool(
+  server.tool(
   "list_threads",
   "List discussion threads in a course",
   {
@@ -136,7 +168,7 @@ server.tool(
   }
 );
 
-server.tool(
+  server.tool(
   "get_thread",
   "Get a thread by global ID, including all comments and answers",
   {
@@ -151,7 +183,7 @@ server.tool(
   }
 );
 
-server.tool(
+  server.tool(
   "get_course_thread",
   "Get a thread by its course-local number (the # shown in the Ed UI)",
   {
@@ -167,7 +199,7 @@ server.tool(
   }
 );
 
-server.tool(
+  server.tool(
   "search_threads",
   "Search threads in a course by title, content, or category",
   {
@@ -209,7 +241,7 @@ server.tool(
   }
 );
 
-server.tool(
+  server.tool(
   "post_thread",
   "Create a new discussion thread. Content can be markdown (auto-converted to Ed XML).",
   {
@@ -224,6 +256,10 @@ server.tool(
     is_pinned: z.boolean().default(false).describe("Pin the thread"),
   },
   async ({ course_id, title, type, category, subcategory, content, is_private, is_anonymous, is_pinned }) => {
+    if (readOnly) {
+      return readOnlyFail("post_thread");
+    }
+
     try {
       const result = await api.postThread(course_id, {
         type,
@@ -259,6 +295,10 @@ server.tool(
     is_pinned: z.boolean().optional(),
   },
   async ({ thread_id, content, ...rest }) => {
+    if (readOnly) {
+      return readOnlyFail("edit_thread");
+    }
+
     try {
       const params: EdEditThreadParams = { ...rest };
       if (content !== undefined) {
@@ -274,47 +314,51 @@ server.tool(
 
 // ── Tools: Thread actions ───────────────────────────────────
 
-const threadActions = {
-  lock: api.lockThread,
-  unlock: api.unlockThread,
-  pin: api.pinThread,
-  unpin: api.unpinThread,
-  endorse: api.endorseThread,
-  unendorse: api.unendorseThread,
-  star: api.starThread,
-  unstar: api.unstarThread,
-} as const;
+  const threadActions = {
+    lock: api.lockThread,
+    unlock: api.unlockThread,
+    pin: api.pinThread,
+    unpin: api.unpinThread,
+    endorse: api.endorseThread,
+    unendorse: api.unendorseThread,
+    star: api.starThread,
+    unstar: api.unstarThread,
+  } as const;
 
-const threadActionDescs: Record<keyof typeof threadActions, string> = {
-  lock: "Lock a thread (prevent new replies)",
-  unlock: "Unlock a thread",
-  pin: "Pin a thread to the top",
-  unpin: "Unpin a thread",
-  endorse: "Endorse a thread (staff)",
-  unendorse: "Remove endorsement from a thread",
-  star: "Star/bookmark a thread",
-  unstar: "Remove star from a thread",
-};
+  const threadActionDescs: Record<keyof typeof threadActions, string> = {
+    lock: "Lock a thread (prevent new replies)",
+    unlock: "Unlock a thread",
+    pin: "Pin a thread to the top",
+    unpin: "Unpin a thread",
+    endorse: "Endorse a thread (staff)",
+    unendorse: "Remove endorsement from a thread",
+    star: "Star/bookmark a thread",
+    unstar: "Remove star from a thread",
+  };
 
-for (const action of Object.keys(threadActions) as (keyof typeof threadActions)[]) {
-  server.tool(
-    `${action}_thread`,
-    threadActionDescs[action],
-    { thread_id: z.number().describe("Global thread ID") },
-    async ({ thread_id }) => {
-      try {
-        await threadActions[action].call(api, thread_id);
-        return msg(`Thread ${thread_id} ${action}ed successfully.`);
-      } catch (err) {
-        return fail(err);
+  for (const action of Object.keys(threadActions) as (keyof typeof threadActions)[]) {
+    server.tool(
+      `${action}_thread`,
+      threadActionDescs[action],
+      { thread_id: z.number().describe("Global thread ID") },
+      async ({ thread_id }) => {
+        if (readOnly) {
+          return readOnlyFail(`${action}_thread`);
+        }
+
+        try {
+          await threadActions[action].call(api, thread_id);
+          return msg(`Thread ${thread_id} ${action}ed successfully.`);
+        } catch (err) {
+          return fail(err);
+        }
       }
-    }
-  );
-}
+    );
+  }
 
 // ── Tools: Comments ─────────────────────────────────────────
 
-server.tool(
+  server.tool(
   "post_comment",
   "Post a comment or answer on a thread. Content can be markdown.",
   {
@@ -325,6 +369,10 @@ server.tool(
     is_anonymous: z.boolean().default(false),
   },
   async ({ thread_id, content, type, is_private, is_anonymous }) => {
+    if (readOnly) {
+      return readOnlyFail("post_comment");
+    }
+
     try {
       const result = await api.postComment(thread_id, ensureEdXml(content), type, {
         is_private,
@@ -337,7 +385,7 @@ server.tool(
   }
 );
 
-server.tool(
+  server.tool(
   "reply_to_comment",
   "Reply to an existing comment",
   {
@@ -347,6 +395,10 @@ server.tool(
     is_anonymous: z.boolean().default(false),
   },
   async ({ comment_id, content, is_private, is_anonymous }) => {
+    if (readOnly) {
+      return readOnlyFail("reply_to_comment");
+    }
+
     try {
       const result = await api.replyToComment(comment_id, ensureEdXml(content), {
         is_private,
@@ -359,11 +411,15 @@ server.tool(
   }
 );
 
-server.tool(
+  server.tool(
   "endorse_comment",
   "Endorse a comment (staff)",
   { comment_id: z.number().describe("Comment ID") },
   async ({ comment_id }) => {
+    if (readOnly) {
+      return readOnlyFail("endorse_comment");
+    }
+
     try {
       await api.endorseComment(comment_id);
       return msg(`Comment ${comment_id} endorsed.`);
@@ -373,11 +429,15 @@ server.tool(
   }
 );
 
-server.tool(
+  server.tool(
   "unendorse_comment",
   "Remove endorsement from a comment",
   { comment_id: z.number().describe("Comment ID") },
   async ({ comment_id }) => {
+    if (readOnly) {
+      return readOnlyFail("unendorse_comment");
+    }
+
     try {
       await api.unendorseComment(comment_id);
       return msg(`Comment ${comment_id} unendorsed.`);
@@ -387,7 +447,7 @@ server.tool(
   }
 );
 
-server.tool(
+  server.tool(
   "accept_answer",
   "Accept a comment as the answer to a question thread",
   {
@@ -395,6 +455,10 @@ server.tool(
     comment_id: z.number().describe("Comment ID to accept"),
   },
   async ({ thread_id, comment_id }) => {
+    if (readOnly) {
+      return readOnlyFail("accept_answer");
+    }
+
     try {
       await api.acceptAnswer(thread_id, comment_id);
       return msg(`Comment ${comment_id} accepted as answer for thread ${thread_id}.`);
@@ -406,7 +470,7 @@ server.tool(
 
 // ── Tools: Users & Activity ─────────────────────────────────
 
-server.tool(
+  server.tool(
   "list_users",
   "List all users enrolled in a course (requires staff/admin)",
   { course_id: z.number().describe("Course ID") },
@@ -419,7 +483,7 @@ server.tool(
   }
 );
 
-server.tool(
+  server.tool(
   "list_user_activity",
   "List a user's recent threads and comments in a course",
   {
@@ -445,6 +509,10 @@ server.tool(
   "Upload a file to Ed from a URL, returns the static file link",
   { url: z.string().url().describe("Public URL of the file to upload") },
   async ({ url }) => {
+    if (readOnly) {
+      return readOnlyFail("upload_file_from_url");
+    }
+
     try {
       const link = await api.uploadFileFromUrl(url);
       return msg(`File uploaded: ${link}`);
@@ -467,7 +535,7 @@ server.tool(
 
 // ── Prompts ─────────────────────────────────────────────────
 
-server.prompt(
+  server.prompt(
   "check_assignment",
   "Look up assignment details, requirements, and staff clarifications",
   {
@@ -487,7 +555,7 @@ server.prompt(
   })
 );
 
-server.prompt(
+  server.prompt(
   "unanswered_questions",
   "List unresolved questions in a course",
   {
@@ -506,7 +574,7 @@ server.prompt(
   })
 );
 
-server.prompt(
+  server.prompt(
   "my_activity",
   "Show your recent posts and comments in a course",
   {
@@ -523,14 +591,98 @@ server.prompt(
       },
     ],
   })
-);
+  );
+
+  return server;
+}
 
 // ── Start ───────────────────────────────────────────────────
 
-async function main() {
+function sendJsonRpcError(res: ServerResponse, status: number, message: string) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json");
+  res.end(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      error: {
+        code: status === 401 ? -32001 : -32603,
+        message,
+      },
+      id: null,
+    })
+  );
+}
+
+async function startStdioServer() {
+  const server = createServer(createApiClient());
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`edstem-mcp server running (region: ${region})`);
+  console.error(`edstem-mcp server running over stdio (region: ${region}, readOnly: ${readOnly})`);
+}
+
+async function startHttpServer() {
+  const app = createMcpExpressApp({ host });
+
+  app.get("/health", (_req: Request, res: Response) => {
+    res.json({ ok: true, transport: "http", region });
+  });
+
+  app.post("/mcp", async (req: Request, res: Response) => {
+    try {
+      const token = getBearerToken(req) ?? getConfiguredToken();
+
+      if (!token) {
+        sendJsonRpcError(res, 401, "Missing bearer token. Use Authorization: Bearer <ED_API_TOKEN>.");
+        return;
+      }
+
+      const server = createServer(createApiClient(token));
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+        enableJsonResponse: true,
+      });
+
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+
+      res.on("close", () => {
+        void transport.close();
+        void server.close();
+      });
+    } catch (err) {
+      if (!res.headersSent) {
+        sendJsonRpcError(res, 500, errorText(err));
+      }
+    }
+  });
+
+  app.get("/mcp", (_req: Request, res: Response) => {
+    res.status(405).set("Allow", "POST").send("Method Not Allowed");
+  });
+
+  app.delete("/mcp", (_req: Request, res: Response) => {
+    res.status(405).set("Allow", "POST").send("Method Not Allowed");
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    const httpServer = app.listen(port, host, () => {
+      console.error(
+        `edstem-mcp server running over HTTP at http://${host}:${port}/mcp (region: ${region}, readOnly: ${readOnly})`
+      );
+      resolve();
+    });
+
+    httpServer.on("error", reject);
+  });
+}
+
+async function main() {
+  if (transportMode === "http") {
+    await startHttpServer();
+    return;
+  }
+
+  await startStdioServer();
 }
 
 main().catch((err) => {
