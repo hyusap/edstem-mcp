@@ -39,8 +39,10 @@ function fail(err: unknown) {
   return { content: [{ type: "text" as const, text: errorText(err) }], isError: true as const };
 }
 
-function readOnlyFail(toolName: string) {
-  return fail(`Tool \"${toolName}\" is disabled because ED_READ_ONLY is enabled.`);
+function registerWritableTool(register: () => void) {
+  if (!readOnly) {
+    register();
+  }
 }
 
 function getConfiguredToken(): string | undefined {
@@ -241,76 +243,72 @@ function createServer(api: EdApiClient): McpServer {
   }
 );
 
-  server.tool(
-  "post_thread",
-  "Create a new discussion thread. Content can be markdown (auto-converted to Ed XML).",
-  {
-    course_id: z.number().describe("Course ID"),
-    title: z.string().describe("Thread title"),
-    type: z.enum(["post", "question", "announcement"]).default("post").describe("Thread type"),
-    category: z.string().describe("Category name"),
-    subcategory: z.string().default("").describe("Subcategory name"),
-    content: z.string().describe("Thread body (markdown or Ed XML)"),
-    is_private: z.boolean().default(false).describe("Private thread"),
-    is_anonymous: z.boolean().default(false).describe("Post anonymously"),
-    is_pinned: z.boolean().default(false).describe("Pin the thread"),
-  },
-  async ({ course_id, title, type, category, subcategory, content, is_private, is_anonymous, is_pinned }) => {
-    if (readOnly) {
-      return readOnlyFail("post_thread");
-    }
-
-    try {
-      const result = await api.postThread(course_id, {
-        type,
-        title,
-        category,
-        subcategory,
-        content: ensureEdXml(content),
-        is_private,
-        is_anonymous,
-        is_pinned,
-        is_megathread: false,
-        anonymous_comments: false,
-      });
-      return ok(result);
-    } catch (err) {
-      return fail(err);
-    }
-  }
-);
-
-server.tool(
-  "edit_thread",
-  "Edit an existing thread. Only provided fields are updated.",
-  {
-    thread_id: z.number().describe("Global thread ID"),
-    title: z.string().optional().describe("New title"),
-    content: z.string().optional().describe("New body (markdown or Ed XML)"),
-    type: z.enum(["post", "question", "announcement"]).optional(),
-    category: z.string().optional(),
-    subcategory: z.string().optional(),
-    is_private: z.boolean().optional(),
-    is_anonymous: z.boolean().optional(),
-    is_pinned: z.boolean().optional(),
-  },
-  async ({ thread_id, content, ...rest }) => {
-    if (readOnly) {
-      return readOnlyFail("edit_thread");
-    }
-
-    try {
-      const params: EdEditThreadParams = { ...rest };
-      if (content !== undefined) {
-        params.content = ensureEdXml(content);
+  registerWritableTool(() => {
+    server.tool(
+      "post_thread",
+      "Create a new discussion thread. Content can be markdown (auto-converted to Ed XML).",
+      {
+        course_id: z.number().describe("Course ID"),
+        title: z.string().describe("Thread title"),
+        type: z.enum(["post", "question", "announcement"]).default("post").describe("Thread type"),
+        category: z.string().describe("Category name"),
+        subcategory: z.string().default("").describe("Subcategory name"),
+        content: z.string().describe("Thread body (markdown or Ed XML)"),
+        is_private: z.boolean().default(false).describe("Private thread"),
+        is_anonymous: z.boolean().default(false).describe("Post anonymously"),
+        is_pinned: z.boolean().default(false).describe("Pin the thread"),
+      },
+      async ({ course_id, title, type, category, subcategory, content, is_private, is_anonymous, is_pinned }) => {
+        try {
+          const result = await api.postThread(course_id, {
+            type,
+            title,
+            category,
+            subcategory,
+            content: ensureEdXml(content),
+            is_private,
+            is_anonymous,
+            is_pinned,
+            is_megathread: false,
+            anonymous_comments: false,
+          });
+          return ok(result);
+        } catch (err) {
+          return fail(err);
+        }
       }
-      const result = await api.editThread(thread_id, params);
-      return ok(result);
-    } catch (err) {
-      return fail(err);
-    }
-  }
-);
+    );
+  });
+
+  registerWritableTool(() => {
+    server.tool(
+      "edit_thread",
+      "Edit an existing thread. Only provided fields are updated.",
+      {
+        thread_id: z.number().describe("Global thread ID"),
+        title: z.string().optional().describe("New title"),
+        content: z.string().optional().describe("New body (markdown or Ed XML)"),
+        type: z.enum(["post", "question", "announcement"]).optional(),
+        category: z.string().optional(),
+        subcategory: z.string().optional(),
+        is_private: z.boolean().optional(),
+        is_anonymous: z.boolean().optional(),
+        is_pinned: z.boolean().optional(),
+      },
+      async ({ thread_id, content, ...rest }) => {
+        try {
+          const params: EdEditThreadParams = { ...rest };
+          if (content !== undefined) {
+            params.content = ensureEdXml(content);
+          }
+          const result = await api.editThread(thread_id, params);
+          return ok(result);
+        } catch (err) {
+          return fail(err);
+        }
+      }
+    );
+  });
 
 // ── Tools: Thread actions ───────────────────────────────────
 
@@ -336,137 +334,125 @@ server.tool(
     unstar: "Remove star from a thread",
   };
 
-  for (const action of Object.keys(threadActions) as (keyof typeof threadActions)[]) {
-    server.tool(
-      `${action}_thread`,
-      threadActionDescs[action],
-      { thread_id: z.number().describe("Global thread ID") },
-      async ({ thread_id }) => {
-        if (readOnly) {
-          return readOnlyFail(`${action}_thread`);
+  registerWritableTool(() => {
+    for (const action of Object.keys(threadActions) as (keyof typeof threadActions)[]) {
+      server.tool(
+        `${action}_thread`,
+        threadActionDescs[action],
+        { thread_id: z.number().describe("Global thread ID") },
+        async ({ thread_id }) => {
+          try {
+            await threadActions[action].call(api, thread_id);
+            return msg(`Thread ${thread_id} ${action}ed successfully.`);
+          } catch (err) {
+            return fail(err);
+          }
         }
+      );
+    }
+  });
 
+// ── Tools: Comments ─────────────────────────────────────────
+
+  registerWritableTool(() => {
+    server.tool(
+      "post_comment",
+      "Post a comment or answer on a thread. Content can be markdown.",
+      {
+        thread_id: z.number().describe("Global thread ID"),
+        content: z.string().describe("Comment body (markdown or Ed XML)"),
+        type: z.enum(["comment", "answer"]).default("comment").describe("Comment or answer"),
+        is_private: z.boolean().default(false),
+        is_anonymous: z.boolean().default(false),
+      },
+      async ({ thread_id, content, type, is_private, is_anonymous }) => {
         try {
-          await threadActions[action].call(api, thread_id);
-          return msg(`Thread ${thread_id} ${action}ed successfully.`);
+          const result = await api.postComment(thread_id, ensureEdXml(content), type, {
+            is_private,
+            is_anonymous,
+          });
+          return ok(result);
         } catch (err) {
           return fail(err);
         }
       }
     );
-  }
+  });
 
-// ── Tools: Comments ─────────────────────────────────────────
+  registerWritableTool(() => {
+    server.tool(
+      "reply_to_comment",
+      "Reply to an existing comment",
+      {
+        comment_id: z.number().describe("Comment ID to reply to"),
+        content: z.string().describe("Reply body (markdown or Ed XML)"),
+        is_private: z.boolean().default(false),
+        is_anonymous: z.boolean().default(false),
+      },
+      async ({ comment_id, content, is_private, is_anonymous }) => {
+        try {
+          const result = await api.replyToComment(comment_id, ensureEdXml(content), {
+            is_private,
+            is_anonymous,
+          });
+          return ok(result);
+        } catch (err) {
+          return fail(err);
+        }
+      }
+    );
+  });
 
-  server.tool(
-  "post_comment",
-  "Post a comment or answer on a thread. Content can be markdown.",
-  {
-    thread_id: z.number().describe("Global thread ID"),
-    content: z.string().describe("Comment body (markdown or Ed XML)"),
-    type: z.enum(["comment", "answer"]).default("comment").describe("Comment or answer"),
-    is_private: z.boolean().default(false),
-    is_anonymous: z.boolean().default(false),
-  },
-  async ({ thread_id, content, type, is_private, is_anonymous }) => {
-    if (readOnly) {
-      return readOnlyFail("post_comment");
-    }
+  registerWritableTool(() => {
+    server.tool(
+      "endorse_comment",
+      "Endorse a comment (staff)",
+      { comment_id: z.number().describe("Comment ID") },
+      async ({ comment_id }) => {
+        try {
+          await api.endorseComment(comment_id);
+          return msg(`Comment ${comment_id} endorsed.`);
+        } catch (err) {
+          return fail(err);
+        }
+      }
+    );
+  });
 
-    try {
-      const result = await api.postComment(thread_id, ensureEdXml(content), type, {
-        is_private,
-        is_anonymous,
-      });
-      return ok(result);
-    } catch (err) {
-      return fail(err);
-    }
-  }
-);
+  registerWritableTool(() => {
+    server.tool(
+      "unendorse_comment",
+      "Remove endorsement from a comment",
+      { comment_id: z.number().describe("Comment ID") },
+      async ({ comment_id }) => {
+        try {
+          await api.unendorseComment(comment_id);
+          return msg(`Comment ${comment_id} unendorsed.`);
+        } catch (err) {
+          return fail(err);
+        }
+      }
+    );
+  });
 
-  server.tool(
-  "reply_to_comment",
-  "Reply to an existing comment",
-  {
-    comment_id: z.number().describe("Comment ID to reply to"),
-    content: z.string().describe("Reply body (markdown or Ed XML)"),
-    is_private: z.boolean().default(false),
-    is_anonymous: z.boolean().default(false),
-  },
-  async ({ comment_id, content, is_private, is_anonymous }) => {
-    if (readOnly) {
-      return readOnlyFail("reply_to_comment");
-    }
-
-    try {
-      const result = await api.replyToComment(comment_id, ensureEdXml(content), {
-        is_private,
-        is_anonymous,
-      });
-      return ok(result);
-    } catch (err) {
-      return fail(err);
-    }
-  }
-);
-
-  server.tool(
-  "endorse_comment",
-  "Endorse a comment (staff)",
-  { comment_id: z.number().describe("Comment ID") },
-  async ({ comment_id }) => {
-    if (readOnly) {
-      return readOnlyFail("endorse_comment");
-    }
-
-    try {
-      await api.endorseComment(comment_id);
-      return msg(`Comment ${comment_id} endorsed.`);
-    } catch (err) {
-      return fail(err);
-    }
-  }
-);
-
-  server.tool(
-  "unendorse_comment",
-  "Remove endorsement from a comment",
-  { comment_id: z.number().describe("Comment ID") },
-  async ({ comment_id }) => {
-    if (readOnly) {
-      return readOnlyFail("unendorse_comment");
-    }
-
-    try {
-      await api.unendorseComment(comment_id);
-      return msg(`Comment ${comment_id} unendorsed.`);
-    } catch (err) {
-      return fail(err);
-    }
-  }
-);
-
-  server.tool(
-  "accept_answer",
-  "Accept a comment as the answer to a question thread",
-  {
-    thread_id: z.number().describe("Global thread ID"),
-    comment_id: z.number().describe("Comment ID to accept"),
-  },
-  async ({ thread_id, comment_id }) => {
-    if (readOnly) {
-      return readOnlyFail("accept_answer");
-    }
-
-    try {
-      await api.acceptAnswer(thread_id, comment_id);
-      return msg(`Comment ${comment_id} accepted as answer for thread ${thread_id}.`);
-    } catch (err) {
-      return fail(err);
-    }
-  }
-);
+  registerWritableTool(() => {
+    server.tool(
+      "accept_answer",
+      "Accept a comment as the answer to a question thread",
+      {
+        thread_id: z.number().describe("Global thread ID"),
+        comment_id: z.number().describe("Comment ID to accept"),
+      },
+      async ({ thread_id, comment_id }) => {
+        try {
+          await api.acceptAnswer(thread_id, comment_id);
+          return msg(`Comment ${comment_id} accepted as answer for thread ${thread_id}.`);
+        } catch (err) {
+          return fail(err);
+        }
+      }
+    );
+  });
 
 // ── Tools: Users & Activity ─────────────────────────────────
 
@@ -504,23 +490,21 @@ server.tool(
 
 // ── Tools: Files ────────────────────────────────────────────
 
-server.tool(
-  "upload_file_from_url",
-  "Upload a file to Ed from a URL, returns the static file link",
-  { url: z.string().url().describe("Public URL of the file to upload") },
-  async ({ url }) => {
-    if (readOnly) {
-      return readOnlyFail("upload_file_from_url");
-    }
-
-    try {
-      const link = await api.uploadFileFromUrl(url);
-      return msg(`File uploaded: ${link}`);
-    } catch (err) {
-      return fail(err);
-    }
-  }
-);
+  registerWritableTool(() => {
+    server.tool(
+      "upload_file_from_url",
+      "Upload a file to Ed from a URL, returns the static file link",
+      { url: z.string().url().describe("Public URL of the file to upload") },
+      async ({ url }) => {
+        try {
+          const link = await api.uploadFileFromUrl(url);
+          return msg(`File uploaded: ${link}`);
+        } catch (err) {
+          return fail(err);
+        }
+      }
+    );
+  });
 
 // ── Tools: Content helpers ──────────────────────────────────
 
